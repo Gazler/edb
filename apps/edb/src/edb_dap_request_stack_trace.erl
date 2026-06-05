@@ -182,7 +182,7 @@ stack_frame(#{node := Node}, Pid, #{id := Id, mfa := 'unknown'}) ->
 
 -spec source(edb_dap_server:state(), binary()) -> edb_dap:source().
 source(#{cwd := Cwd}, FilePath0) ->
-    FileName = filename:basename(FilePath0, ".erl"),
+    FileName = filename:rootname(filename:basename(FilePath0)),
     FilePath =
         case filename:pathtype(FilePath0) of
             absolute ->

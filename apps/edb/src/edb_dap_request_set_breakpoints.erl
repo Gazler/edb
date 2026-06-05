@@ -31,6 +31,7 @@ setBreakpoints requests: https://microsoft.github.io/debug-adapter-protocol/spec
 -export([parse_arguments/1, handle/2]).
 
 -export([source_template/0, format_breakpoint_error/1]).
+-export([source_path_to_modules/1]).
 
 %% ------------------------------------------------------------------
 %% Types
@@ -213,24 +214,120 @@ handle(_UnexpectedState, _) ->
 -spec set_breakpoints(Args) -> edb_dap_request:reaction(response()) when
     Args :: arguments().
 set_breakpoints(Args = #{source := #{path := Path}}) ->
-    Module = binary_to_atom(filename:basename(Path, ".erl")),
-
+    Modules = source_path_to_modules(Path),
     SourceBreakpoints = maps:get(breakpoints, Args, []),
     SourceBreakpointLines = [Line || #{line := Line} <- SourceBreakpoints],
 
-    LineResults = edb:set_breakpoints(Module, SourceBreakpointLines),
+    LineResultsPerModule = [{Module, edb:set_breakpoints(Module, SourceBreakpointLines)} || Module <- Modules],
 
-    Breakpoints = [
-        case Result of
-            ok ->
-                #{line => Line, verified => true};
-            {error, Reason} ->
-                Message = format_breakpoint_error(Reason),
-                #{line => Line, verified => false, message => Message, reason => failed}
-        end
-     || {Line, Result} <:- LineResults
-    ],
+    Breakpoints = [breakpoint_response(Line, line_result(Line, LineResultsPerModule)) || Line <- SourceBreakpointLines],
     #{response => edb_dap_request:success(#{breakpoints => Breakpoints})}.
+
+-spec source_path_to_modules(Path) -> [module()] when Path :: binary().
+source_path_to_modules(Path) ->
+    case filename:extension(Path) of
+        ~".erl" ->
+            [binary_to_atom(filename:basename(Path, ".erl"))];
+        Ext when Ext =:= ~".ex"; Ext =:= ~".exs" ->
+            elixir_source_path_to_modules(Path);
+        _ ->
+            [binary_to_atom(filename:basename(Path))]
+    end.
+
+-spec elixir_source_path_to_modules(Path) -> [module()] when Path :: binary().
+elixir_source_path_to_modules(Path) ->
+    Modules =
+        case file:read_file(Path) of
+            {ok, Source} -> elixir_modules_in_source(Source);
+            {error, _} -> []
+        end,
+    case Modules of
+        [] -> [elixir_module_from_path(Path)];
+        _ -> Modules
+    end.
+
+-spec elixir_modules_in_source(binary()) -> [module()].
+elixir_modules_in_source(Source) ->
+    case
+        re:run(Source, ~"(?m)^\\s*defmodule\\s+([A-Z][A-Za-z0-9_]*(?:\\.[A-Z][A-Za-z0-9_]*)*)\\s+do\\b", [
+            global,
+            {capture, [1], binary}
+        ])
+    of
+        {match, Matches} ->
+            unique_modules([binary_to_atom(<<"Elixir.", Name/binary>>) || [Name] <- Matches]);
+        nomatch ->
+            []
+    end.
+
+-spec elixir_module_from_path(Path) -> module() when Path :: binary().
+elixir_module_from_path(Path) ->
+    Extension = filename:extension(Path),
+    Base = filename:basename(Path, Extension),
+    ModuleName = iolist_to_binary([capitalize(Segment) || Segment <- binary:split(Base, ~"_", [global])]),
+    binary_to_atom(<<"Elixir.", ModuleName/binary>>).
+
+-spec capitalize(binary()) -> binary().
+capitalize(<<First, Rest/binary>>) when First >= $a, First =< $z ->
+    <<(First - 32), Rest/binary>>;
+capitalize(Other) ->
+    Other.
+
+-spec unique_modules([module()]) -> [module()].
+unique_modules(Modules) ->
+    unique_modules(Modules, #{}, []).
+
+-spec unique_modules([module()], #{module() => []}, [module()]) -> [module()].
+unique_modules([], _Seen, Acc) ->
+    lists:reverse(Acc);
+unique_modules([Module | Rest], Seen, Acc) ->
+    case Seen of
+        #{Module := _} -> unique_modules(Rest, Seen, Acc);
+        #{} -> unique_modules(Rest, Seen#{Module => []}, [Module | Acc])
+    end.
+
+-spec line_result(Line, LineResultsPerModule) -> ok | {error, edb:add_breakpoint_error()} when
+    Line :: number(),
+    LineResultsPerModule :: [{module(), edb:set_breakpoints_result()}].
+line_result(Line, LineResultsPerModule) ->
+    Results = [
+        Result
+     || {_Module, LineResults} <- LineResultsPerModule,
+        {ResultLine, Result} <- LineResults,
+        ResultLine =:= Line
+    ],
+    case lists:member(ok, Results) of
+        true -> ok;
+        false -> {error, preferred_error(Line, Results)}
+    end.
+
+-spec preferred_error(edb:line(), [ok | {error, edb:add_breakpoint_error()}]) -> edb:add_breakpoint_error().
+preferred_error(Line, []) ->
+    {badkey, Line};
+preferred_error(_Line, Results) ->
+    Errors = [Reason || {error, Reason} <- Results],
+    case [Reason || Reason <- Errors, not is_module_not_found(Reason)] of
+        [Reason | _] -> Reason;
+        [] -> hd(Errors)
+    end.
+
+-spec is_module_not_found(edb:add_breakpoint_error()) -> boolean().
+is_module_not_found({badkey, Module}) when is_atom(Module) ->
+    true;
+is_module_not_found(_) ->
+    false.
+
+-spec breakpoint_response(Line, Result) -> breakpoint() when
+    Line :: number(),
+    Result :: ok | {error, edb:add_breakpoint_error()}.
+breakpoint_response(Line, Result) ->
+    case Result of
+        ok ->
+            #{line => Line, verified => true};
+        {error, Reason} ->
+            Message = format_breakpoint_error(Reason),
+            #{line => Line, verified => false, message => Message, reason => failed}
+    end.
 
 -spec format_breakpoint_error(Error) -> binary() when
     Error :: edb:add_breakpoint_error().

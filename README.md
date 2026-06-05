@@ -26,6 +26,19 @@ Since the debugger is a development-only tool, restrict the options to the `test
 ]}.
 ```
 
+For Mix projects, enable the equivalent Elixir compiler options in `mix.exs`:
+
+```elixir
+def project do
+  [
+    elixirc_options: [
+      beam_debug_info: true,
+      beam_debug_stack: true
+    ]
+  ]
+end
+```
+
 ### 3. Add a launch configuration
 
 Create `.vscode/launch.json` in your project. The example below covers the two common entry points: launching a `rebar3 shell` under the debugger, or attaching to an already-running node.

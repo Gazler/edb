@@ -31,11 +31,13 @@
 %% Test cases
 -export([test_error_set_breakpoint_bad_line/1]).
 -export([test_error_set_breakpoint_unknown_module/1]).
+-export([test_resolves_elixir_source_modules/1]).
 
 all() ->
     [
         test_error_set_breakpoint_bad_line,
-        test_error_set_breakpoint_unknown_module
+        test_error_set_breakpoint_unknown_module,
+        test_resolves_elixir_source_modules
     ].
 
 init_per_testcase(_TestCase, Config) ->
@@ -148,5 +150,29 @@ test_error_set_breakpoint_unknown_module(Config) ->
         },
 
         Response
+    ),
+    ok.
+
+test_resolves_elixir_source_modules(Config) ->
+    PrivDir = proplists:get_value(priv_dir, Config),
+    SourcePath = filename:join(PrivDir, "my_app_thing.ex"),
+    ok = file:write_file(SourcePath, [
+        ~"defmodule MyApp.Foo do\n",
+        ~"  def go, do: :ok\n",
+        ~"end\n",
+        ~"\n",
+        ~"defmodule MyApp.Bar do\n",
+        ~"  def go, do: :ok\n",
+        ~"end\n"
+    ]),
+
+    ?assertEqual(
+        ['Elixir.MyApp.Foo', 'Elixir.MyApp.Bar'],
+        edb_dap_request_set_breakpoints:source_path_to_modules(edb_test_support:file_name_all_to_binary(SourcePath))
+    ),
+
+    ?assertEqual(
+        ['Elixir.UserController'],
+        edb_dap_request_set_breakpoints:source_path_to_modules(~"/project/lib/user_controller.ex")
     ),
     ok.

@@ -144,6 +144,7 @@ phase (typically, by including this environment variable somewhere in the given 
 
 1. The Erlang node you're attaching to must be started with the `+D` flag to enable debugging support.
 2. For the launch configuration, EDB will automatically add the `+D` flag to the `ERL_AFLAGS` environment variable.
+3. Elixir projects must be compiled with `elixirc_options: [beam_debug_info: true, beam_debug_stack: true]` so OTP exposes line breakpoints and variable metadata to EDB.
 
 ## IDE-Specific Configuration Examples
 
