@@ -213,12 +213,12 @@ handle(_UnexpectedState, _) ->
 -spec set_breakpoints(Args) -> edb_dap_request:reaction(response()) when
     Args :: arguments().
 set_breakpoints(Args = #{source := #{path := Path}}) ->
-    Module = binary_to_atom(filename:basename(Path, ".erl")),
+    Modules = source_path_to_modules(Path),
 
     SourceBreakpoints = maps:get(breakpoints, Args, []),
     SourceBreakpointLines = [Line || #{line := Line} <- SourceBreakpoints],
 
-    LineResults = edb:set_breakpoints(Module, SourceBreakpointLines),
+    LineResults = set_breakpoints_in_modules(Modules, SourceBreakpointLines),
 
     Breakpoints = [
         case Result of
@@ -231,6 +231,103 @@ set_breakpoints(Args = #{source := #{path := Path}}) ->
      || {Line, Result} <:- LineResults
     ],
     #{response => edb_dap_request:success(#{breakpoints => Breakpoints})}.
+
+-spec source_path_to_modules(Path :: file:filename_all()) -> [module()].
+source_path_to_modules(Path) ->
+    case unicode:characters_to_binary(filename:extension(Path)) of
+        Ext when Ext =:= <<".ex">>; Ext =:= <<".exs">> ->
+            elixir_source_path_to_modules(Path);
+        _Other ->
+            [module_from_source_path(Path)]
+    end.
+
+-spec elixir_source_path_to_modules(Path :: file:filename_all()) -> [module()].
+elixir_source_path_to_modules(Path) ->
+    Eval = fun() ->
+        ModuleName = fun
+            (Parts, undefined) ->
+                'Elixir.Module':concat(Parts);
+            (Parts, Parent) ->
+                'Elixir.Module':concat([Parent | Parts])
+        end,
+        ModuleNameFromAlias = fun
+            ({'__aliases__', _Meta, Parts}, Parent) when is_list(Parts) ->
+                ModuleName(Parts, Parent);
+            (Module, _Parent) when is_atom(Module) ->
+                Module;
+            (_Other, _Parent) ->
+                undefined
+        end,
+        CollectModules = fun
+            CollectModules({'__block__', _Meta, Exprs}, Parent) when is_list(Exprs) ->
+                lists:append([CollectModules(Expr, Parent) || Expr <- Exprs]);
+            CollectModules({defmodule, _Meta, [Alias, [{do, Block}]]}, Parent) ->
+                case ModuleNameFromAlias(Alias, Parent) of
+                    undefined -> [];
+                    Module -> [Module | CollectModules(Block, Module)]
+                end;
+            CollectModules(_Other, _Parent) ->
+                []
+        end,
+        case code:ensure_loaded(elixir) of
+            {module, elixir} ->
+                SourcePath = unicode:characters_to_binary(Path),
+                case file:read_file(SourcePath) of
+                    {ok, Source} ->
+                        case
+                            elixir:string_to_quoted(
+                                unicode:characters_to_list(Source), 1, 1, SourcePath, []
+                            )
+                        of
+                            {ok, Quoted} -> CollectModules(Quoted, undefined);
+                            {error, _Reason} -> []
+                        end;
+                    {error, _Reason} ->
+                        []
+                end;
+            {error, _Reason} ->
+                []
+        end
+    end,
+    case edb:eval(#{function => Eval, timeout => 5_000}) of
+        {ok, [_ | _] = Modules} -> Modules;
+        _ -> [module_from_source_path(Path)]
+    end.
+
+-spec module_from_source_path(Path :: file:filename_all()) -> module().
+module_from_source_path(Path) ->
+    Extension = filename:extension(Path),
+    ModuleName = filename:basename(Path, Extension),
+    binary_to_atom(unicode:characters_to_binary(ModuleName)).
+
+-spec set_breakpoints_in_modules(Modules, Lines) -> edb:set_breakpoints_result() when
+    Modules :: [module()],
+    Lines :: [edb:line()].
+set_breakpoints_in_modules([Module], Lines) ->
+    edb:set_breakpoints(Module, Lines);
+set_breakpoints_in_modules(Modules, Lines) ->
+    ResultsByModule = [edb:set_breakpoints(Module, Lines) || Module <- Modules],
+    [{Line, merge_line_results(Line, ResultsByModule)} || Line <- Lines].
+
+-spec merge_line_results(Line, ResultsByModule) -> ok | {error, edb:add_breakpoint_error()} when
+    Line :: edb:line(),
+    ResultsByModule :: [edb:set_breakpoints_result()].
+merge_line_results(Line, ResultsByModule) ->
+    LineResults = [
+        Result
+     || ModuleResults <- ResultsByModule,
+        {ResultLine, Result} <- ModuleResults,
+        ResultLine =:= Line
+    ],
+    case lists:member(ok, LineResults) of
+        true ->
+            ok;
+        false ->
+            case LineResults of
+                [{error, Reason} | _] -> {error, Reason};
+                [] -> {error, {badkey, Line}}
+            end
+    end.
 
 -spec format_breakpoint_error(Error) -> binary() when
     Error :: edb:add_breakpoint_error().
