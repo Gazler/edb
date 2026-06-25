@@ -24,7 +24,7 @@ Default Erlang language hooks.
 
 -behaviour(edb_dap_language).
 
--export([init/0, source_to_modules/3]).
+-export([init/0, source_to_modules/3, step_in_skip_targets/1]).
 
 -spec init() -> #{}.
 init() ->
@@ -38,3 +38,8 @@ source_to_modules(Path, _Lines, State) ->
     Extension = filename:extension(Path),
     ModuleName = filename:basename(Path, Extension),
     {[binary_to_atom(unicode:characters_to_binary(ModuleName))], State}.
+
+-spec step_in_skip_targets(State) -> {[], State} when
+    State :: #{}.
+step_in_skip_targets(State) ->
+    {[], State}.

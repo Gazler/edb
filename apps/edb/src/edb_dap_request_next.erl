@@ -86,18 +86,24 @@ handle(State, #{threadId := ThreadId}) ->
     State :: edb_dap_server:state(),
     ThreadId :: edb_dap:thread_id(),
     StepType :: 'step-over' | 'step-in' | 'step-out'.
-stepper(#{state := attached}, ThreadId, StepType) ->
+stepper(State0 = #{state := attached}, ThreadId, StepType) ->
     Pid = edb_dap_request:thread_id_to_pid(ThreadId),
-    StepFun =
+    {StepFun, State1} =
         case StepType of
-            'step-over' -> fun edb:step_over/1;
-            'step-in' -> fun edb:step_in/1;
-            'step-out' -> fun edb:step_out/1
+            'step-over' ->
+                {fun edb:step_over/1, State0};
+            'step-in' ->
+                #{dap_language := DapLanguage, dap_language_state := DapLanguageState0} = State0,
+                {SkipTargets, DapLanguageState1} = DapLanguage:step_in_skip_targets(DapLanguageState0),
+                StepInOptions = #{skip_targets => SkipTargets},
+                {fun(Pid0) -> edb:step_in(Pid0, StepInOptions) end, State0#{dap_language_state => DapLanguageState1}};
+            'step-out' ->
+                {fun edb:step_out/1, State0}
         end,
     case StepFun(Pid) of
         ok ->
             edb_dap_id_mappings:reset(),
-            #{response => edb_dap_request:success()};
+            #{response => edb_dap_request:success(), new_state => State1};
         {error, not_paused} ->
             edb_dap_request:not_paused(Pid);
         {error, {cannot_breakpoint, ModuleName}} ->

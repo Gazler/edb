@@ -32,3 +32,6 @@ Language-specific hooks for the DAP adapter.
     Lines :: [edb:line()],
     Modules :: [module()],
     State :: dynamic().
+-callback step_in_skip_targets(State) -> {SkipTargets, State} when
+    SkipTargets :: [edb:step_in_skip_target()],
+    State :: dynamic().

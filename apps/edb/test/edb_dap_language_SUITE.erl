@@ -28,20 +28,24 @@
 
 %% Test cases
 -export([test_set_breakpoint_with_custom_dap_language/1]).
+-export([test_step_in_uses_custom_dap_language_skip_targets/1]).
 
 %% edb_dap_language callbacks
--export([init/0, source_to_modules/3]).
+-export([init/0, source_to_modules/3, step_in_skip_targets/1]).
 
 all() ->
     [
-        test_set_breakpoint_with_custom_dap_language
+        test_set_breakpoint_with_custom_dap_language,
+        test_step_in_uses_custom_dap_language_skip_targets
     ].
 
 init_per_testcase(_TestCase, Config) ->
     {ok, _} = application:ensure_all_started(edb_core),
+    ok = start_id_mappings(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
+    ok = stop_id_mappings(),
     _ = application:stop(edb_core),
     edb_test_support:stop_all_peers(),
     ok.
@@ -92,6 +96,53 @@ test_set_breakpoint_with_custom_dap_language(Config) ->
     ),
     ok.
 
+test_step_in_uses_custom_dap_language_skip_targets(Config) ->
+    Module = edb_custom_language_step_target,
+    {ok, #{peer := Peer, node := Node, cookie := Cookie}} = edb_test_support:start_peer_node(Config, #{
+        modules => [
+            {source, [
+                ~"-module(edb_custom_language_step_target).     %L01\n",
+                ~"-export([go/0]).                              %L02\n",
+                ~"go() ->                                       %L03\n",
+                ~"    f(23) + g(24).                            %L04\n",
+                ~"f(X) ->                                       %L05\n",
+                ~"    X + 1.                                    %L06\n",
+                ~"g(X) ->                                       %L07\n",
+                ~"    X + 2.                                    %L08\n"
+            ]}
+        ]
+    }),
+    ok = edb:attach(#{node => Node, cookie => Cookie}),
+
+    ok = edb:add_breakpoint(Module, 4),
+    erlang:spawn(fun() -> peer:call(Peer, Module, go, []) end),
+    {ok, paused} = edb:wait(),
+    [{Pid, #{line := 4}}] = maps:to_list(edb:get_breakpoints_hit()),
+
+    ok = edb:clear_breakpoint(Module, 4),
+    ThreadId = edb_dap_id_mappings:pid_to_thread_id(Pid),
+    DapLanguageState0 = #{
+        step_in_skip_targets => [{Module, f, 1}],
+        step_in_skip_target_calls => 0
+    },
+    Reaction = edb_dap_request_next:stepper(
+        #{state => attached, dap_language => ?MODULE, dap_language_state => DapLanguageState0},
+        ThreadId,
+        'step-in'
+    ),
+
+    ?assertMatch(
+        #{
+            response := #{success := true},
+            new_state := #{dap_language_state := #{step_in_skip_target_calls := 1}}
+        },
+        Reaction
+    ),
+
+    {ok, paused} = edb:wait(),
+    {ok, [#{mfa := {Module, g, 1}, line := 8} | _]} = edb:stack_frames(Pid),
+    ok.
+
 %%--------------------------------------------------------------------
 %% edb_dap_language callbacks
 %%--------------------------------------------------------------------
@@ -103,3 +154,32 @@ source_to_modules(Path, Lines, State0 = #{modules_by_source := ModulesBySource})
     SourceLookups = maps:get(source_lookups, State0),
     State1 = State0#{source_lookups => SourceLookups ++ [{Path, Lines}]},
     {Modules, State1}.
+
+step_in_skip_targets(State) ->
+    SkipTargets = maps:get(step_in_skip_targets, State, []),
+    Calls = maps:get(step_in_skip_target_calls, State, 0),
+    {SkipTargets, State#{step_in_skip_target_calls => Calls + 1}}.
+
+start_id_mappings() ->
+    ok = start_id_mapping(fun edb_dap_id_mappings:start_link_thread_ids_server/0),
+    ok = start_id_mapping(fun edb_dap_id_mappings:start_link_frame_ids_server/0),
+    ok = start_id_mapping(fun edb_dap_id_mappings:start_link_var_reference_ids_server/0),
+    ok.
+
+start_id_mapping(StartFun) ->
+    case StartFun() of
+        {ok, _Pid} -> ok;
+        {error, {already_started, _Pid}} -> ok
+    end.
+
+stop_id_mappings() ->
+    ok = stop_id_mapping(edb_dap_thread_id_mappings),
+    ok = stop_id_mapping(edb_dap_frame_id_mappings),
+    ok = stop_id_mapping(edb_dap_vars_ref_mappings),
+    ok.
+
+stop_id_mapping(Name) ->
+    case erlang:whereis(Name) of
+        undefined -> ok;
+        Pid -> gen_server:stop(Pid)
+    end.

@@ -208,6 +208,7 @@ remove_module_substitute(SubstituteModule) ->
     | {excluded_processes, [edb:process_info_field()]}
     | {step_over, pid()}
     | {step_in, pid()}
+    | {step_in, pid(), edb:step_in_options()}
     | {step_out, pid()}
     | {exclude_processes, [procs_spec()]}
     | {unexclude_processes, [procs_spec()]}
@@ -395,6 +396,8 @@ dispatch_call({step_out, Pid}, _From, State0) ->
     step_impl(fun(Breakpoints) -> edb_server_break:prepare_for_stepping(step_out, Pid, Breakpoints) end, State0);
 dispatch_call({step_in, Pid}, _From, State0) ->
     step_impl(fun(Breakpoints) -> edb_server_break:prepare_for_stepping_in(Pid, Breakpoints) end, State0);
+dispatch_call({step_in, Pid, Options}, _From, State0) ->
+    step_impl(fun(Breakpoints) -> edb_server_break:prepare_for_stepping_in(Pid, Options, Breakpoints) end, State0);
 dispatch_call({eval, Opts = #{}}, {CallerPid, _}, State0) ->
     eval_impl(Opts, CallerPid, State0).
 

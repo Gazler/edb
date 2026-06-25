@@ -33,7 +33,7 @@
 
 % Stepping
 -export([prepare_for_stepping/3]).
--export([prepare_for_stepping_in/2]).
+-export([prepare_for_stepping_in/2, prepare_for_stepping_in/3]).
 
 % Execution control
 -export([is_process_trapped/2]).
@@ -357,6 +357,13 @@ prepare_for_stepping(StepType, Pid, Breakpoints0) ->
     Pid :: pid(),
     Error :: edb:step_in_error().
 prepare_for_stepping_in(Pid, Breakpoints0) ->
+    prepare_for_stepping_in(Pid, #{}, Breakpoints0).
+
+-spec prepare_for_stepping_in(Pid, Options, breakpoints()) -> {ok, breakpoints()} | {error, Error} when
+    Pid :: pid(),
+    Options :: edb:step_in_options(),
+    Error :: edb:step_in_error().
+prepare_for_stepping_in(Pid, Options, Breakpoints0) ->
     case edb_server_stack_frames:raw_stack_frames(Pid) of
         not_paused ->
             {error, not_paused};
@@ -367,45 +374,81 @@ prepare_for_stepping_in(Pid, Breakpoints0) ->
             case get_targets_for_step_in(Vars, TopFrame) of
                 {error, _} = Error ->
                     Error;
-                {ok, TargetMFAs} ->
+                {ok, TargetMFAs0} ->
+                    TargetMFAs = skip_step_in_targets(TargetMFAs0, maps:get(skip_targets, Options, [])),
                     {_, #{function := CurrentMFA}, _} = TopFrame,
                     Addrs = call_stack_addrs(StackFrames),
 
-                    AddStepsOnStepInTargetsResult = lists:foldl(
-                        fun
-                            (_TargetMFA, {{error, _}, _BreakpointsN} = Error) ->
-                                Error;
-                            (TargetMFA, {ok, BreakpointsN}) ->
-                                case add_steps_on_step_in_target(Pid, CurrentMFA, TargetMFA, Addrs, BreakpointsN) of
-                                    {error, {cannot_breakpoint, erlang} = Error} ->
-                                        case lists:search(fun({M, _, _}) -> M /= erlang end, TargetMFAs) of
-                                            {value, _} ->
-                                                % Corner-case: the compiler may inject implicit calls to functions in the erlang
-                                                % module, like `erlang:'!'/2` or `erlang:error/1` and it may be that OTP is not
-                                                % built with +beam_debug_info. Let's just ignore those failures
-                                                {ok, BreakpointsN};
-                                            false ->
-                                                Error
-                                        end;
-                                    Error = {error, _} ->
-                                        {Error, BreakpointsN};
-                                    OkResult ->
-                                        OkResult
-                                end
-                        end,
-                        {ok, Breakpoints0},
-                        TargetMFAs
-                    ),
-                    case AddStepsOnStepInTargetsResult of
-                        {Error = {error, _}, Breakpoints1} ->
-                            _Breakpoints2 = clear_steps(Pid, Breakpoints1),
-                            Error;
-                        {ok, Breakpoints1} ->
-                            RelevantFrames = StackFrames,
-                            Types = [on_exc_handler || _ <- RelevantFrames],
-                            add_steps_on_stack_frames(Pid, RelevantFrames, Addrs, Types, Breakpoints1)
+                    case TargetMFAs of
+                        [] ->
+                            prepare_for_stepping(step_over, Pid, Breakpoints0);
+                        [_ | _] ->
+                            AddStepsOnStepInTargetsResult = lists:foldl(
+                                fun
+                                    (_TargetMFA, {{error, _}, _BreakpointsN} = Error) ->
+                                        Error;
+                                    (TargetMFA, {ok, BreakpointsN}) ->
+                                        case add_steps_on_step_in_target(Pid, CurrentMFA, TargetMFA, Addrs, BreakpointsN) of
+                                            {error, {cannot_breakpoint, erlang} = Error} ->
+                                                case lists:search(fun({M, _, _}) -> M /= erlang end, TargetMFAs) of
+                                                    {value, _} ->
+                                                        % Corner-case: the compiler may inject implicit calls to functions in the erlang
+                                                        % module, like `erlang:'!'/2` or `erlang:error/1` and it may be that OTP is not
+                                                        % built with +beam_debug_info. Let's just ignore those failures
+                                                        {ok, BreakpointsN};
+                                                    false ->
+                                                        Error
+                                                end;
+                                            Error = {error, _} ->
+                                                {Error, BreakpointsN};
+                                            OkResult ->
+                                                OkResult
+                                        end
+                                end,
+                                {ok, Breakpoints0},
+                                TargetMFAs
+                            ),
+                            case AddStepsOnStepInTargetsResult of
+                                {Error = {error, _}, Breakpoints1} ->
+                                    _Breakpoints2 = clear_steps(Pid, Breakpoints1),
+                                    Error;
+                                {ok, Breakpoints1} ->
+                                    RelevantFrames = StackFrames,
+                                    Types = [on_exc_handler || _ <- RelevantFrames],
+                                    add_steps_on_stack_frames(Pid, RelevantFrames, Addrs, Types, Breakpoints1)
+                            end
                     end
             end
+    end.
+
+-spec skip_step_in_targets([mfa()], [edb:step_in_skip_target()]) -> [mfa()].
+skip_step_in_targets(TargetMFAs, SkipTargets) ->
+    [TargetMFA || TargetMFA <- TargetMFAs, not skip_step_in_target(TargetMFA, SkipTargets)].
+
+-spec skip_step_in_target(mfa(), [edb:step_in_skip_target()]) -> boolean().
+skip_step_in_target(TargetMFA, SkipTargets) ->
+    lists:any(fun(SkipTarget) -> skip_step_in_target_1(TargetMFA, SkipTarget) end, SkipTargets).
+
+-spec skip_step_in_target_1(mfa(), edb:step_in_skip_target()) -> boolean().
+skip_step_in_target_1(TargetMFA, TargetMFA) ->
+    true;
+skip_step_in_target_1({TargetModule, _, _}, TargetModule) when is_atom(TargetModule) ->
+    true;
+skip_step_in_target_1({TargetModule, _, _}, {module, TargetModule}) ->
+    true;
+skip_step_in_target_1({TargetModule, _, _}, {module_prefix, ModulePrefix}) ->
+    module_has_prefix(TargetModule, ModulePrefix);
+skip_step_in_target_1(_TargetMFA, _SkipTarget) ->
+    false.
+
+-spec module_has_prefix(module(), binary() | string()) -> boolean().
+module_has_prefix(Module, Prefix) ->
+    ModuleBin = atom_to_binary(Module),
+    PrefixBin = unicode:characters_to_binary(Prefix),
+    PrefixSize = byte_size(PrefixBin),
+    case ModuleBin of
+        <<PrefixBin:PrefixSize/binary, _/binary>> -> true;
+        _ -> false
     end.
 
 -spec add_steps_on_step_in_target(Pid, CurrentMFA, TargetMFA, Addrs, breakpoints()) ->

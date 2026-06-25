@@ -98,6 +98,8 @@
 -export([test_step_in_on_external_fun_var/1]).
 -export([test_step_in_on_local_fun_var/1]).
 -export([test_step_in_on_closure_var/1]).
+-export([test_step_in_skips_targets/1]).
+-export([test_step_in_steps_over_when_all_targets_are_skipped/1]).
 -export([test_step_in_fails_if_var_not_a_fun/1]).
 -export([test_step_in_fails_if_non_fun_target/1]).
 -export([test_step_in_fails_if_fun_not_found/1]).
@@ -214,6 +216,8 @@ groups() ->
             test_step_in_on_external_fun_var,
             test_step_in_on_local_fun_var,
             test_step_in_on_closure_var,
+            test_step_in_skips_targets,
+            test_step_in_steps_over_when_all_targets_are_skipped,
 
             test_step_in_fails_if_var_not_a_fun,
             test_step_in_fails_if_non_fun_target,
@@ -3002,6 +3006,42 @@ test_step_in_on_closure_var(_Config) ->
     % Closures step into the synthesized closure function (not foo/1 directly),
     % so we check landing in the closure body — which itself calls foo(X).
     {ok, #{mfa := {test_step_in, _, 1}, line := 66}} = gen_test_step_in(Fun, Args, LineCallingF).
+
+test_step_in_skips_targets(_Config) ->
+    M = test_step_in,
+    Fun = call_under_binop,
+    LineCallingFooAndBar = 38,
+
+    ok = edb:add_breakpoint(M, LineCallingFooAndBar),
+    Pid = erlang:spawn(M, Fun, []),
+    {ok, paused} = edb:wait(),
+
+    {ok, [#{mfa := {M, Fun, 0}, line := LineCallingFooAndBar}]} = edb:stack_frames(Pid),
+    ok = edb:clear_breakpoint(M, LineCallingFooAndBar),
+
+    ok = edb:step_in(Pid, #{skip_targets => [{M, foo, 1}]}),
+    {ok, paused} = edb:wait(),
+
+    {ok, [#{mfa := {M, bar, 1}, line := 71} | _]} = edb:stack_frames(Pid),
+    ok.
+
+test_step_in_steps_over_when_all_targets_are_skipped(_Config) ->
+    M = test_step_in,
+    Fun = call_static_local,
+    LineCallingFoo = 9,
+
+    ok = edb:add_breakpoint(M, LineCallingFoo),
+    Pid = erlang:spawn(M, Fun, []),
+    {ok, paused} = edb:wait(),
+
+    {ok, [#{mfa := {M, Fun, 0}, line := LineCallingFoo}]} = edb:stack_frames(Pid),
+    ok = edb:clear_breakpoint(M, LineCallingFoo),
+
+    ok = edb:step_in(Pid, #{skip_targets => [M]}),
+    {ok, paused} = edb:wait(),
+
+    {ok, [#{mfa := {M, Fun, 0}, line := 10} | _]} = edb:stack_frames(Pid),
+    ok.
 
 test_step_in_fails_if_var_not_a_fun(_Config) ->
     M = test_step_in,

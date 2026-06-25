@@ -38,7 +38,7 @@ The (new!) Erlang debugger
 -export([get_breakpoints/0, get_breakpoints/1]).
 -export([get_breakpoints_hit/0]).
 
--export([step_over/1, step_in/1, step_out/1]).
+-export([step_over/1, step_in/1, step_in/2, step_out/1]).
 
 -export([processes/1, process_info/2]).
 
@@ -118,7 +118,7 @@ A function-breakpoint may not be added for various reasons:
 -export_type([set_function_breakpoints_result/0]).
 -type set_function_breakpoints_result() :: [{mfa(), Result :: ok | {error, add_function_breakpoint_error()}}].
 
--export_type([step_error/0, step_in_error/0, call_target_error/0]).
+-export_type([step_error/0, step_in_error/0, step_in_options/0, step_in_skip_target/0, call_target_error/0]).
 -type step_error() ::
     not_paused
     | {cannot_breakpoint, module()}.
@@ -126,6 +126,16 @@ A function-breakpoint may not be added for various reasons:
 -type step_in_error() ::
     step_error()
     | {call_target, call_target_error()}.
+
+-type step_in_skip_target() ::
+    module()
+    | mfa()
+    | {module, module()}
+    | {module_prefix, binary() | string()}.
+
+-type step_in_options() :: #{
+    skip_targets => [step_in_skip_target()]
+}.
 
 -type call_target_error() ::
     not_found
@@ -608,7 +618,13 @@ be determined.
 -spec step_in(Pid) -> ok | {error, step_in_error()} when
     Pid :: pid().
 step_in(Pid) ->
-    call_server({step_in, Pid}).
+    step_in(Pid, #{}).
+
+-spec step_in(Pid, Options) -> ok | {error, step_in_error()} when
+    Pid :: pid(),
+    Options :: step_in_options().
+step_in(Pid, Options) ->
+    call_server({step_in, Pid, Options}).
 
 -doc """
 Waits until the node gets paused.
