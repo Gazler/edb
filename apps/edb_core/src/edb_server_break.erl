@@ -124,7 +124,7 @@ create() ->
 %% --------------------------------------------------------------------
 -spec add_user_breakpoint
     (user_line_breakpoint(), breakpoints()) ->
-        {ok, breakpoints()} | {error, edb:add_breakpoint_error()};
+        {ok, breakpoints()} | {error, edb:add_breakpoint_error()} | {error, edb:add_breakpoint_error(), breakpoints()};
     (user_function_breakpoint(), breakpoints()) ->
         {ok, breakpoints()} | {error, edb:add_function_breakpoint_error()}.
 add_user_breakpoint({Module, Line}, Breakpoints0) ->
@@ -138,7 +138,8 @@ add_user_breakpoint({Module, Line}, Breakpoints0) ->
         {error, timeout} ->
             {error, timeout_loading_module};
         {error, _} ->
-            {error, {badkey, Module}}
+            Breakpoints1 = record_user_line_breakpoint(VmModule, Line, Breakpoints0),
+            {error, {badkey, Module}, Breakpoints1}
     end;
 add_user_breakpoint(MFA = {Module, Fun, Arity}, Breakpoints0) ->
     VmModule = to_vm_module(Module, Breakpoints0),
@@ -175,6 +176,7 @@ add_user_breakpoints(DesiredBreakpoints, Breakpoints0) ->
         fun(BreakpointDescription, AccBreakpointsIn) ->
             case add_user_breakpoint(BreakpointDescription, AccBreakpointsIn) of
                 {ok, AccBreakpointsOut} -> {{BreakpointDescription, ok}, AccBreakpointsOut};
+                {error, Error, AccBreakpointsOut} -> {{BreakpointDescription, {error, Error}}, AccBreakpointsOut};
                 {error, Error} -> {{BreakpointDescription, {error, Error}}, AccBreakpointsIn}
             end
         end,
@@ -844,9 +846,7 @@ add_vm_breakpoint(VmModule = {vm_module, Module}, _, _, _) when map_get(Module, 
     {error, {unsupported, VmModule}};
 add_vm_breakpoint(VmModule, Line, ReasonItem, Breakpoints0) ->
     %% Register the new breakpoint reason at this location
-    #breakpoints{vm_breakpoints = VmBreakpoints0} = Breakpoints0,
-    VmBreakpoints1 = record_vm_breakpoint(VmModule, Line, ReasonItem, VmBreakpoints0),
-    Breakpoints1 = Breakpoints0#breakpoints{vm_breakpoints = VmBreakpoints1},
+    Breakpoints1 = record_vm_breakpoint(VmModule, Line, ReasonItem, Breakpoints0),
 
     %% Set the VM breakpoint.
     %% We do this regardless of whether it was already set at this location
@@ -857,6 +857,14 @@ add_vm_breakpoint(VmModule, Line, ReasonItem, Breakpoints0) ->
         {error, Error} ->
             {error, Error}
     end.
+
+-spec record_user_line_breakpoint(VmModule, Line, Breakpoints0) -> Breakpoints1 when
+    VmModule :: vm_module(),
+    Line :: line(),
+    Breakpoints0 :: breakpoints(),
+    Breakpoints1 :: breakpoints().
+record_user_line_breakpoint(VmModule, Line, Breakpoints0) ->
+    record_vm_breakpoint(VmModule, Line, {line_breakpoint, []}, Breakpoints0).
 
 -spec add_vm_breakpoints_or_rollback(VmModule, Lines, ReasonItem, Breakpoints0) -> {ok, Breakpoints1} | failed when
     VmModule :: vm_module(),
@@ -1320,13 +1328,14 @@ its associated metadata.
     | {fun_breakpoint, mfa()}
     | {{step, pid()}, #{call_stack_pattern() => []}}.
 
--spec record_vm_breakpoint(VmModule, Line, ReasonItem, VmBreakpoints0) -> VmBreakpoints1 when
+-spec record_vm_breakpoint(VmModule, Line, ReasonItem, Breakpoints0) -> Breakpoints1 when
     VmModule :: vm_module(),
     Line :: line(),
     ReasonItem :: vm_breakpoint_reason_item(),
-    VmBreakpoints0 :: vm_breakpoints(),
-    VmBreakpoints1 :: vm_breakpoints().
-record_vm_breakpoint(VmModule, Line, ReasonItem, VmBreakpoints0) ->
+    Breakpoints0 :: breakpoints(),
+    Breakpoints1 :: breakpoints().
+record_vm_breakpoint(VmModule, Line, ReasonItem, Breakpoints0) ->
+    #breakpoints{vm_breakpoints = VmBreakpoints0} = Breakpoints0,
     Bps1 =
         case VmBreakpoints0 of
             #{VmModule := Bps0 = #{Line := Reasons0}} ->
@@ -1339,7 +1348,7 @@ record_vm_breakpoint(VmModule, Line, ReasonItem, VmBreakpoints0) ->
                 Reasons = record_vm_breakpoint_reason(ReasonItem, #{}),
                 #{Line => Reasons}
         end,
-    VmBreakpoints0#{VmModule => Bps1}.
+    Breakpoints0#breakpoints{vm_breakpoints = VmBreakpoints0#{VmModule => Bps1}}.
 
 -spec record_vm_breakpoint_reason(vm_breakpoint_reason_item(), vm_breakpoint_reasons()) -> vm_breakpoint_reasons().
 record_vm_breakpoint_reason({K = line_breakpoint, V}, Reasons) ->

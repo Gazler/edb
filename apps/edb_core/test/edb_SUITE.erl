@@ -51,6 +51,7 @@
 -export([test_set_breakpoints_sets_breakpoints/1]).
 -export([test_set_breakpoints_returns_result_per_line/1]).
 -export([test_set_breakpoints_loads_the_module_if_necessary/1]).
+-export([test_set_breakpoints_records_unloaded_modules_for_reapply/1]).
 -export([test_set_breakpoints_fails_if_module_loading_is_stuck/1]).
 
 %% Test cases for the test_function_breakpoints group
@@ -164,6 +165,7 @@ groups() ->
             test_set_breakpoints_sets_breakpoints,
             test_set_breakpoints_returns_result_per_line,
             test_set_breakpoints_loads_the_module_if_necessary,
+            test_set_breakpoints_records_unloaded_modules_for_reapply,
             test_set_breakpoints_fails_if_module_loading_is_stuck
         ]},
         {test_function_breakpoints, [
@@ -1533,6 +1535,36 @@ test_set_breakpoints_loads_the_module_if_necessary(Config) ->
         edb:set_breakpoints(NonExistentModule, [4])
     ),
 
+    ok.
+
+test_set_breakpoints_records_unloaded_modules_for_reapply(Config) ->
+    Module = list_to_atom(lists:concat([pending_breakpoints_module_, erlang:unique_integer([positive])])),
+    Source =
+        io_lib:format(
+            "-module(~s).~n-export([go/1]).~ngo(Receiver) ->~n    Receiver ! done,~n    ok.~n",
+            [atom_to_list(Module)]
+        ),
+    SourceDir = edb_test_support:random_srcdir(Config),
+    SourceFile = filename:join(SourceDir, atom_to_list(Module) ++ ".erl"),
+    SourceFileStr = edb_test_support:file_name_all_to_string(SourceFile),
+    ok = file:write_file(SourceFile, Source),
+    {ok, Module, Binary} = compile:file(SourceFileStr, [binary, beam_debug_info, return_errors]),
+
+    ?assertEqual(
+        [{4, {error, {badkey, Module}}}],
+        edb:set_breakpoints(Module, [4])
+    ),
+    ?assertEqual(
+        [#{type => line, line => 4, module => Module}],
+        edb:get_breakpoints(Module)
+    ),
+
+    {module, Module} = code:load_binary(Module, SourceFileStr, Binary),
+    ?assertEqual(ok, edb_server:reapply_breakpoints(Module)),
+    ?assertMatch({ok, #{{go, 1} := #{4 := true}}}, erl_debugger:breakpoints(Module)),
+
+    code:delete(Module),
+    code:purge(Module),
     ok.
 
 test_set_breakpoints_fails_if_module_loading_is_stuck(Config) ->
